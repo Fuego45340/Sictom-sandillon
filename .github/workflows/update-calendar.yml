@@ -1,0 +1,39 @@
+name: Mise a jour calendrier SICTOM Sandillon
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "13 7 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-calendar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dependances
+        run: python -m pip install --upgrade pip PyMuPDF
+
+      - name: Detecter et extraire le calendrier officiel
+        run: python scripts/update_calendar.py
+
+      - name: Publier le JSON si le calendrier a change
+        run: |
+          if git diff --quiet -- collectes.json; then
+            echo "Aucun changement de calendrier."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add collectes.json
+          git commit -m "Mise a jour automatique du calendrier SICTOM"
+          git push

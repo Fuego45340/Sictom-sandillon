@@ -9,6 +9,8 @@ import re
 import sys
 import unicodedata
 import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -62,37 +64,91 @@ def normalize(value: str) -> str:
 
 
 def find_pdf(year: int) -> str:
-    # First search the official page, using both the PDF filename and its link label.
+    """Find the commune/year page first, then follow its PDF download link."""
+    page_urls: list[str] = [CALENDAR_PAGE]
+
+    # WordPress search API: it returns the intermediate commune calendar page,
+    # even when the main calendar listing is filtered or loaded dynamically.
+    search_url = (
+        "https://sictom-chateauneuf.fr/wp-json/wp/v2/search?"
+        + urllib.parse.urlencode({"search": f"Sandillon calendrier {year}", "per_page": 100})
+    )
     try:
-        parser = PDFLinkParser()
-        parser.feed(get_page(CALENDAR_PAGE))
-        matches: list[tuple[int, str]] = []
-        for href, label in parser.links:
-            absolute = urljoin(CALENDAR_PAGE, href)
-            if not urlsplit(absolute).path.casefold().endswith(".pdf"):
-                continue
-
-            searchable = normalize(f"{absolute} {label}")
-            if "sandillon" not in searchable:
-                continue
-            if not any(term in searchable for term in ("calendrier", "collecte")):
-                continue
-            if str(year) not in searchable:
-                continue
-
-            # Prefer links whose filename itself contains all identifying terms.
-            filename = normalize(Path(urlsplit(absolute).path).name)
-            score = sum(term in filename for term in ("sandillon", "calendrier", str(year)))
-            matches.append((score, absolute))
-
-        if matches:
-            matches.sort(key=lambda item: item[0], reverse=True)
-            print(f"PDF {year} détecté sur la page officielle : {matches[0][1]}")
-            return matches[0][1]
+        results = json.loads(get_page(search_url))
+        for item in results:
+            url = item.get("url")
+            title = item.get("title", {}).get("rendered", "") if isinstance(item.get("title"), dict) else item.get("title", "")
+            searchable = normalize(f"{url or ''} {title or ''}")
+            if url and "sandillon" in searchable and ("calendrier" in searchable or "collecte" in searchable):
+                page_urls.append(url)
     except Exception as error:
-        print(f"Recherche sur la page officielle impossible : {error}")
+        print(f"Recherche WordPress API indisponible : {error}")
 
-    # Fallback for the SICTOM's currently used file naming convention.
+    # Sitemap fallback: locate matching Sandillon calendar pages without
+    # depending on the exact PDF filename or on the main page's visible cards.
+    try:
+        sitemap_root = ET.fromstring(get_page("https://sictom-chateauneuf.fr/wp-sitemap.xml"))
+        sitemap_locs = [
+            node.text.strip()
+            for node in sitemap_root.iter()
+            if node.tag.endswith("loc") and node.text
+        ]
+        for sitemap_url in sitemap_locs:
+            if "post" not in sitemap_url and "page" not in sitemap_url:
+                continue
+            try:
+                root = ET.fromstring(get_page(sitemap_url))
+                for node in root.iter():
+                    if not node.tag.endswith("loc") or not node.text:
+                        continue
+                    url = node.text.strip()
+                    slug = normalize(url)
+                    if "sandillon" in slug and ("calendrier" in slug or "collecte" in slug):
+                        page_urls.append(url)
+            except Exception as error:
+                print(f"Sitemap ignoré ({sitemap_url}) : {error}")
+    except Exception as error:
+        print(f"Sitemap WordPress indisponible : {error}")
+
+    # Also inspect links present directly on the official calendar listing.
+    unique_pages = list(dict.fromkeys(page_urls))
+    pdf_matches: list[tuple[int, str]] = []
+    for page_url in unique_pages:
+        try:
+            page_html = get_page(page_url)
+            page_text = normalize(re.sub(r"<[^>]+>", " ", page_html))
+            if page_url != CALENDAR_PAGE:
+                if "sandillon" not in page_text or str(year) not in page_text:
+                    continue
+                if not any(term in page_text for term in ("calendrier", "collecte")):
+                    continue
+
+            parser = PDFLinkParser()
+            parser.feed(page_html)
+            for href, label in parser.links:
+                absolute = urljoin(page_url, html.unescape(href))
+                if not urlsplit(absolute).path.casefold().endswith(".pdf"):
+                    continue
+                searchable = normalize(f"{absolute} {label} {page_text}")
+                if "sandillon" not in searchable or str(year) not in searchable:
+                    continue
+                if not any(term in searchable for term in ("calendrier", "collecte")):
+                    continue
+                filename = normalize(Path(urlsplit(absolute).path).name)
+                score = sum(term in filename for term in ("sandillon", "calendrier", str(year)))
+                if page_url != CALENDAR_PAGE:
+                    score += 3
+                pdf_matches.append((score, absolute))
+        except Exception as error:
+            print(f"Page ignorée ({page_url}) : {error}")
+
+    if pdf_matches:
+        pdf_matches.sort(key=lambda item: item[0], reverse=True)
+        chosen = pdf_matches[0][1]
+        print(f"PDF {year} détecté après recherche des pages Sandillon : {chosen}")
+        return chosen
+
+    # Final fallback for known SICTOM file naming conventions.
     candidates = [
         f"https://sictom-chateauneuf.fr/wp-content/uploads/{year - 1}/11/SANDILLON_-Calendrier-de-collecte-{year}.pdf",
         f"https://sictom-chateauneuf.fr/wp-content/uploads/{year - 1}/11/SANDILLON-Calendrier-de-collectes-{year}.pdf",

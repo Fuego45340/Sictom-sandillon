@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Extract Sandillon collection dates from the official SICTOM PDF.
-
-The collection markers are colored vector rectangles in the PDF:
-- yellow: selective sorting
-- grey: household waste
-
-The script deliberately stops on an unexpected layout or incomplete extraction.
-It never writes a partial calendar.
-"""
+"""Extract Sandillon collection dates from the official SICTOM PDF."""
 from __future__ import annotations
 
 import argparse
@@ -41,18 +33,12 @@ def download_pdf(url: str, destination: Path) -> None:
     destination.write_bytes(data)
 
 
-def close(a: float, b: float, tolerance: float) -> bool:
-    return abs(a - b) <= tolerance
-
-
-def classify_marker(fill: tuple[float, ...] | None) -> str | None:
+def classify_marker(fill):
     if not fill or len(fill) < 3:
         return None
     red, green, blue = fill[:3]
-    # SICTOM yellow marker.
     if red > 0.95 and 0.75 < green < 0.88 and blue < 0.15:
         return "tri_selectif"
-    # SICTOM grey marker (slightly blue-tinted in the source PDF).
     if 0.45 < red < 0.55 and 0.45 < green < 0.55 and 0.50 < blue < 0.58:
         return "ordures_menageres"
     return None
@@ -69,7 +55,7 @@ def extract(pdf_path: Path, expected_year: int) -> dict:
     for page in document:
         words = page.get_text("words")
         page_text = page.get_text()
-        if re.search(rf"Calendrier de collectes\\s+{expected_year}\\b", page_text, re.I):
+        if re.search(rf"Calendrier de collectes\s+{expected_year}\b", page_text, re.I):
             found_year = True
 
         headings = [
@@ -85,7 +71,6 @@ def extract(pdf_path: Path, expected_year: int) -> dict:
             rect = drawing["rect"]
             if not (65 < rect.width < 80 and 10 < rect.height < 20):
                 continue
-
             collection = classify_marker(drawing.get("fill"))
             if collection is None:
                 continue
@@ -95,15 +80,12 @@ def extract(pdf_path: Path, expected_year: int) -> dict:
                 if rect.x0 - 1 <= (word[0] + word[2]) / 2 <= rect.x1 + 1
                 and rect.y0 - 1 <= (word[1] + word[3]) / 2 <= rect.y1 + 1
             ]
-            days = [int(word[4]) for word in contained if re.fullmatch(r"\\d{1,2}", word[4])]
+            days = [int(word[4]) for word in contained if re.fullmatch(r"\d{1,2}", word[4])]
             if len(days) != 1:
-                raise RuntimeError(
-                    f"Impossible d'identifier un jour dans un repère {collection} : {contained}"
-                )
+                raise RuntimeError(f"Impossible d'identifier le jour du repère {collection}.")
 
             month = min(headings, key=lambda item: abs(item[1] - (rect.x0 + rect.x1) / 2))[0]
-            date = dt.date(expected_year, month, days[0]).isoformat()
-            result[collection].append(date)
+            result[collection].append(dt.date(expected_year, month, days[0]).isoformat())
 
     if not found_year:
         raise RuntimeError(f"Le PDF ne semble pas être le calendrier {expected_year}.")
@@ -113,10 +95,7 @@ def extract(pdf_path: Path, expected_year: int) -> dict:
             raise RuntimeError(f"Dates en double dans {collection}.")
         dates.sort()
         if not MIN_DATES <= len(dates) <= MAX_DATES:
-            raise RuntimeError(
-                f"Nombre de dates incohérent pour {collection} : {len(dates)}."
-            )
-
+            raise RuntimeError(f"Nombre de dates incohérent pour {collection} : {len(dates)}.")
     return result
 
 
@@ -138,13 +117,13 @@ def main() -> int:
             "consigne": "Sortir les poubelles la veille. Passage du camion l'après-midi.",
             **dates,
         }
-        output = Path(args.output)
-        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+        Path(args.output).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(json.dumps({
             "annee": args.year,
             "ordures_menageres": len(dates["ordures_menageres"]),
             "tri_selectif": len(dates["tri_selectif"]),
-            "output": str(output),
         }, ensure_ascii=False))
         return 0
     except Exception as error:

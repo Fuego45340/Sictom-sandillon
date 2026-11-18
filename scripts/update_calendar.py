@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 import json
 import re
-import shutil
 import sys
+import unicodedata
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 from extract_calendar import download_pdf, extract
@@ -26,14 +28,71 @@ def get_page(url: str) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
-def find_pdf(year: int) -> str:
-    html = get_page(CALENDAR_PAGE)
-    links = re.findall(r"""href\s*=\s*["']([^"']+\.pdf(?:\?[^"']*)?)["']""", html, re.I)
-    for href in links:
-        absolute = urljoin(CALENDAR_PAGE, href)
-        if "sandillon" in absolute.lower() and re.search(rf"{year}", absolute):
-            return absolute
+class PDFLinkParser(HTMLParser):
+    """Collect PDF links together with the visible text of their anchor."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self.current_href: str | None = None
+        self.current_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "a":
+            self.current_href = dict(attrs).get("href")
+            self.current_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self.current_href is not None:
+            self.current_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self.current_href is not None:
+            self.links.append((self.current_href, " ".join(self.current_text)))
+            self.current_href = None
+            self.current_text = []
+
+
+def normalize(value: str) -> str:
+    value = html.unescape(value).casefold()
+    return "".join(
+        char for char in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(char)
+    )
+
+
+def find_pdf(year: int) -> str:
+    # First search the official page, using both the PDF filename and its link label.
+    try:
+        parser = PDFLinkParser()
+        parser.feed(get_page(CALENDAR_PAGE))
+        matches: list[tuple[int, str]] = []
+        for href, label in parser.links:
+            absolute = urljoin(CALENDAR_PAGE, href)
+            if not urlsplit(absolute).path.casefold().endswith(".pdf"):
+                continue
+
+            searchable = normalize(f"{absolute} {label}")
+            if "sandillon" not in searchable:
+                continue
+            if not any(term in searchable for term in ("calendrier", "collecte")):
+                continue
+            if str(year) not in searchable:
+                continue
+
+            # Prefer links whose filename itself contains all identifying terms.
+            filename = normalize(Path(urlsplit(absolute).path).name)
+            score = sum(term in filename for term in ("sandillon", "calendrier", str(year)))
+            matches.append((score, absolute))
+
+        if matches:
+            matches.sort(key=lambda item: item[0], reverse=True)
+            print(f"PDF {year} détecté sur la page officielle : {matches[0][1]}")
+            return matches[0][1]
+    except Exception as error:
+        print(f"Recherche sur la page officielle impossible : {error}")
+
+    # Fallback for the SICTOM's currently used file naming convention.
     candidates = [
         f"https://sictom-chateauneuf.fr/wp-content/uploads/{year - 1}/11/SANDILLON_-Calendrier-de-collecte-{year}.pdf",
         f"https://sictom-chateauneuf.fr/wp-content/uploads/{year - 1}/11/SANDILLON-Calendrier-de-collectes-{year}.pdf",
@@ -42,11 +101,13 @@ def find_pdf(year: int) -> str:
         temp = Path("candidate-check.pdf")
         try:
             download_pdf(candidate, temp)
+            print(f"PDF {year} trouvé via l'adresse de secours : {candidate}")
             return candidate
         except Exception:
             pass
         finally:
             temp.unlink(missing_ok=True)
+
     raise RuntimeError(f"Calendrier PDF de Sandillon {year} introuvable sur le site officiel.")
 
 

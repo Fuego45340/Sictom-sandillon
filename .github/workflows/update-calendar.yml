@@ -7,6 +7,12 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   update-calendar:
@@ -26,14 +32,32 @@ jobs:
       - name: Detecter et extraire le calendrier officiel
         run: python scripts/update_calendar.py
 
-      - name: Publier le JSON si le calendrier a change
+      - name: Publier le JSON dans le depot si le calendrier a change
         run: |
           if git diff --quiet -- collectes.json; then
             echo "Aucun changement de calendrier."
-            exit 0
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add collectes.json
+            git commit -m "Mise a jour automatique du calendrier SICTOM"
+            git push
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add collectes.json
-          git commit -m "Mise a jour automatique du calendrier SICTOM"
-          git push
+
+      - name: Configurer GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Preparer le site statique
+        run: |
+          mkdir -p site
+          cp collectes.json site/collectes.json
+          touch site/.nojekyll
+
+      - name: Charger le site pour publication
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Publier sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
